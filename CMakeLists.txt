@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------------
 # 
 # ----------------------------------------------------------------------------
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.22)
 set(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR}/build)
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
 set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}) 
@@ -14,12 +14,13 @@ project(${project_name})
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fPIC -std=c++11")
 
 FIND_PACKAGE(OpenCV REQUIRED)
+INCLUDE_DIRECTORIES(OpenCV_INCLUDE_DIRS)
 
 #----------------------------------------------------------------------------  
 #  
 # ----------------------------------------------------------------------------
 SET(SOURCE
-main.cpp
+	main.cpp
 )
 #----------------------------------------------------------------------------  
 
@@ -39,13 +40,16 @@ INCLUDE_DIRECTORIES("./")
 # ----------------------------------------------------------------------------  
 # 
 # ----------------------------------------------------------------------------
-  ADD_EXECUTABLE( ${project_name}
-  				  ${SOURCE}
-  				  ${HEADERS}
-  				  )
+ADD_EXECUTABLE ( 
+	${project_name}
+	${SOURCE}
+	${HEADERS}
+)
+
 # ----------------------------------------------------------------------------
 # 
 # ----------------------------------------------------------------------------
-TARGET_LINK_LIBRARIES(${project_name}
-                      ${OpenCV_LIBS}
-					  )
+TARGET_LINK_LIBRARIES (
+	${project_name}
+	${OpenCV_LIBS}
+)
