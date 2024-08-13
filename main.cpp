@@ -81,111 +81,34 @@ struct Trajectory
     double a; // angle
 };
 
-// skip alligment movement if ROI offset lower than threshold
-#define ALLIGMENT_ERROR_THRESHOLD 3.0
-
-// global structure to remember some states changed
-// by mouse action and move
-struct initRoi
+std::string gst_cap_pipeline()
 {
-    // on off
-    bool init;
-    // updated ROI rectangle
-    bool updated;
-
-    // initial coordination based on EVENT_LBUTTONDOWN
-    int initX;
-    int initY;
-
-    // actual coordination
-    int actualX;
-    int actualY;
-
-    // Selected Rect
-    Rect roiRect;
-} SelectedRoi;
-
-// event int is compared to determine action of the mouse EVENT_RBUTTONDOWN
-//  EVENT_LBUTTONDOWN, EVENT_LBUTTONUP, EVENT_MOUSEMOVE.
-//  If the event is evauated as happened the global structure SelectedRoi
-//  is updated.
-static void MouseCallBack(int event, int x, int y, int flags, void *img)
-{
-    // Mouse Right button down
-    if (event == EVENT_RBUTTONDOWN)
-    {
-        return;
-    }
-    // Mouse Left button down
-    if (event == EVENT_LBUTTONDOWN)
-    {
-        cout << "Mouse down lbut" << endl;
-        SelectedRoi.initX = x;
-        SelectedRoi.initY = y;
-        return;
-    }
-    // Mouse Left button up
-    if (event == EVENT_LBUTTONUP)
-    {
-        cout << "Mouse up lbut" << endl;
-        SelectedRoi.actualX = x;
-        SelectedRoi.actualY = y;
-        int width = x - SelectedRoi.initX;
-        int height = y - SelectedRoi.initY;
-        SelectedRoi.roiRect = Rect(
-            SelectedRoi.initX, SelectedRoi.initY,
-            width, height);
-
-        SelectedRoi.init = true;
-        SelectedRoi.updated = true;
-        return;
-    }
-    // Mouse move coordinates update
-    if (event == EVENT_MOUSEMOVE)
-    {
-        SelectedRoi.actualX = x;
-        SelectedRoi.actualY = y;
-        return;
-    }
+    return "libcamerasrc camera-name=\"/base/soc/i2c0mux/i2c@1/imx477@1a\"\
+        ! capsfilter caps=video/x-raw,width=1920,height=1080,framerate=30/1,format=NV12\
+        ! queue2 max-size-bytes=0\
+        ! v4l2convert ! capsfilter caps=\"video/x-raw, format=BGR\"\
+        ! appsink sync=false";
 }
 
-Point2i calcROIOffset(Mat &frame, Rect &roi)
+std::string gst_out_pipeline()
 {
-    // frame center
-    Point2i fCenter = Point2i(frame.size().height / 2, frame.size().width / 2);
-    // ROI center
-    Point2i rCenter = Point2i(roi.x + roi.width / 2, roi.y + roi.height / 2);
-
-    return fCenter - rCenter;
-}
-
-std::string gstreamer_pipeline(int capture_width, int capture_height, int display_width,
-                               int display_height, int framerate, int flip_method)
-{
-    return "nvarguscamerasrc ! video/x-raw(memory:NVMM), width=(int)" + std::to_string(capture_width) + ", height=(int)" + std::to_string(capture_height) + ", framerate=(fraction)" + std::to_string(framerate) + "/1 ! nvvidconv flip-method=" + std::to_string(flip_method) + " ! video/x-raw, width=(int)" + std::to_string(display_width) + ", height=(int)" + std::to_string(display_height) + ", format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink";
+    return "appsrc \
+        ! video/x-raw, format=BGR\
+        ! queue2 max-size-bytes=0\
+        ! v4l2h264enc extra-controls=\"controls,repeat_sequence_header=1\"\
+        ! h264parse ! rtph264pay config-interval=1 pt=96\
+        ! udpsink host=192.168.191.18 port=5000 sync=false";
 }
 
 int main(int argc, char **argv)
 {
-    SelectedRoi.init = false;
-    SelectedRoi.updated = false;
+    // cout << cv::getBuildInformation() << endl;
     Mat frame;
     VideoCapture cap;
+    VideoWriter out;
     Ptr<Tracker> tracker;
 
-    int capture_width = 1920;
-    int capture_height = 1080;
-    int display_width = 1920;
-    int display_height = 1080;
-    int framerate = 60;
-    int flip_method = 2;
-
-    std::string pipeline = gstreamer_pipeline(capture_width,
-                                              capture_height,
-                                              display_width,
-                                              display_height,
-                                              framerate,
-                                              flip_method);
+    std::string pipeline = gst_cap_pipeline();
     std::cout << "Using pipeline: \n\t" << pipeline << "\n";
 
     cap.open(pipeline, cv::CAP_GSTREAMER);
@@ -196,17 +119,18 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    namedWindow("tracker", WINDOW_AUTOSIZE);
-    setMouseCallback("tracker", MouseCallBack, 0);
-
-    // perform the tracking process
-    printf("Start the tracking process, press ESC to quit.\n");
-
-    ofstream out_transform("prev_to_cur_transformation.txt");
-    ofstream out_trajectory("trajectory.txt");
-    ofstream out_smoothed_trajectory("smoothed_trajectory.txt");
-    ofstream out_new_transform("new_prev_to_cur_transformation.txt");
-
+    out.open(gst_out_pipeline(), 
+        cv::CAP_GSTREAMER, // apiPreference
+        0, // fourcc
+	    30, // fps
+	    cv::Size{1920, 1080}, 
+        true);
+    if (!out.isOpened())
+    {
+        cerr << "ERROR! Unable to open video writer\n";
+        return -1;
+    }
+    
     Mat cur, cur_grey;
     Mat prev, prev_grey;
 
@@ -247,8 +171,6 @@ int main(int argc, char **argv)
     int max_frames = cap.get(CAP_PROP_FRAME_COUNT);
     Mat last_T;
     Mat prev_grey_, cur_grey_;
-
-    bool lf = true;
     for (;;)
     {
         cap.read(frame);
@@ -256,37 +178,6 @@ int main(int argc, char **argv)
         {
             cerr << "ERROR! blank frame grabbed\n";
             break;
-        }
-
-        if (SelectedRoi.init && lf)
-        {
-            tracker = TrackerCSRT::create();
-            tracker->init(frame, SelectedRoi.roiRect);
-            lf = false;
-        }
-
-        if (SelectedRoi.updated)
-        {
-            tracker = TrackerCSRT::create();
-            tracker->init(frame, SelectedRoi.roiRect);
-            SelectedRoi.updated = false;
-        }
-
-        if (SelectedRoi.init)
-        {
-            cout << "Rect width: " + std::to_string(SelectedRoi.roiRect.width) + " height: " + std::to_string(SelectedRoi.roiRect.height) << endl;
-
-            tracker->update(frame, SelectedRoi.roiRect);
-
-            Point2i ROIoffset = calcROIOffset(frame, SelectedRoi.roiRect);
-            double alligmentError = cv::sqrt(ROIoffset.ddot(ROIoffset));
-            if (alligmentError > ALLIGMENT_ERROR_THRESHOLD)
-            {
-                // do gimbal alligment
-                // calculate pitch, yaw angles for correction
-            }
-
-            rectangle(frame, SelectedRoi.roiRect, Scalar(0, 0, 255), 2, 1);
         }
 
         // ============ Stabilize =================
@@ -327,19 +218,12 @@ int main(int argc, char **argv)
         double dx = T.at<double>(0, 2);
         double dy = T.at<double>(1, 2);
         double da = atan2(T.at<double>(1, 0), T.at<double>(0, 0));
-        //
-        // prev_to_cur_transform.push_back(TransformParam(dx, dy, da));
-
-        out_transform << k << " " << dx << " " << dy << " " << da << endl;
-        //
+        
         // Accumulated frame to frame transform
         x += dx;
         y += dy;
         a += da;
-        // trajectory.push_back(Trajectory(x,y,a));
-        //
-        out_trajectory << k << " " << x << " " << y << " " << a << endl;
-        //
+        
         z = Trajectory(x, y, a);
         //
         if (k == 1)
@@ -358,11 +242,9 @@ int main(int argc, char **argv)
             X = X_ + K * (z - X_);              // z-X_ is residual,X(k) = X_(k)+K(k)*(z(k)-X_(k));
             P = (Trajectory(1, 1, 1) - K) * P_; // P(k) = (1-K(k))*P_(k);
         }
-        // smoothed_trajectory.push_back(X);
-        out_smoothed_trajectory << k << " " << X.x << " " << X.y << " " << X.a << endl;
-        //-
+    
         // target - current
-        double diff_x = X.x - x; //
+        double diff_x = X.x - x;
         double diff_y = X.y - y;
         double diff_a = X.a - a;
 
@@ -370,10 +252,6 @@ int main(int argc, char **argv)
         dy = dy + diff_y;
         da = da + diff_a;
 
-        // new_prev_to_cur_transform.push_back(TransformParam(dx, dy, da));
-        //
-        out_new_transform << k << " " << dx << " " << dy << " " << da << endl;
-        //
         T.at<double>(0, 0) = cos(da);
         T.at<double>(0, 1) = -sin(da);
         T.at<double>(1, 0) = sin(da);
@@ -385,39 +263,36 @@ int main(int argc, char **argv)
         Mat cur2;
         warpAffine(prev, cur2, T, cur.size());
         cur2 = cur2(Range(vert_border, cur2.rows - vert_border), Range(HORIZONTAL_BORDER_CROP, cur2.cols - HORIZONTAL_BORDER_CROP));
+        // // ==================== Display =================
 
-        // ==================== Display =================
+        // // Resize cur2 back to cur size, for better side by side comparison
+        // resize(cur2, cur2, cur.size());
 
-        // Resize cur2 back to cur size, for better side by side comparison
-        resize(cur2, cur2, cur.size());
+        // // Now draw the original and stablised side by side for coolness
+        // Mat canvas = Mat::zeros(cur.rows, cur.cols * 2 + 10, cur.type());
 
-        // Now draw the original and stablised side by side for coolness
-        Mat canvas = Mat::zeros(cur.rows, cur.cols * 2 + 10, cur.type());
+        // prev.copyTo(canvas(Range::all(), Range(0, cur2.cols)));
+        // cur2.copyTo(canvas(Range::all(), Range(cur2.cols + 10, cur2.cols * 2 + 10)));
 
-        prev.copyTo(canvas(Range::all(), Range(0, cur2.cols)));
-        cur2.copyTo(canvas(Range::all(), Range(cur2.cols + 10, cur2.cols * 2 + 10)));
+        // // If too big to fit on the screen, then scale it down by 2, hopefully it'll fit :)
+        // if (canvas.cols > 1920)
+        // {
+        //     resize(canvas, canvas, Size(canvas.cols / 2, canvas.rows` / 2));
+        // }
+        // // outputVideo<<canvas;
+        // imshow("before and after", canvas);
 
-        // If too big to fit on the screen, then scale it down by 2, hopefully it'll fit :)
-        if (canvas.cols > 1920)
-        {
-            resize(canvas, canvas, Size(canvas.cols / 2, canvas.rows / 2));
-        }
-        // outputVideo<<canvas;
-        imshow("before and after", canvas);
+        out << cur2;
 
-        waitKey(10);
-        prev = cur.clone(); // cur.copyTo(prev);
+        cur.copyTo(prev);
         cur_grey.copyTo(prev_grey);
-
-        cout << "Frame: " << k << "/" << max_frames << " - good optical flow: " << prev_corner2.size() << endl;
         k++;
-
-        // show image with the tracked object
-        imshow("tracker", frame);
 
         // quit on ESC button
         if (waitKey(1) == 27)
         {
+            cap.release();
+            out.release();
             destroyAllWindows();
             break;
         }
