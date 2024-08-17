@@ -17,6 +17,10 @@ using namespace cv;
 // const int SMOOTHING_RADIUS = 15; // In frames. The larger the more stable the video, but less reactive to sudden panning
 const int HORIZONTAL_BORDER_CROP = 20; // In pixels. Crops the border to reduce the black borders from stabilisation being too noticeable.
 
+// Fraction of captured frame width and height
+// Skip frame transformation if exceeds, to avoid big movement artifacts
+const float WARP_THRESHOLD = 0.25;
+
 // 1. Get previous to current frame transformation (dx, dy, da) for all frames
 // 2. Accumulate the transformations to get the image trajectory
 // 3. Smooth out the trajectory using an averaging window
@@ -81,23 +85,42 @@ struct Trajectory
     double a; // angle
 };
 
-std::string gst_cap_pipeline()
+void fixBorder(Mat &frame_stabilized)
+{
+    Mat T = getRotationMatrix2D(Point2f(frame_stabilized.cols / 2, frame_stabilized.rows / 2), 0, 1.04);
+    warpAffine(frame_stabilized, frame_stabilized, T, frame_stabilized.size());
+}
+
+std::string gst_cap_pipeline(int cap_width, int cap_height)
 {
     return "libcamerasrc camera-name=\"/base/soc/i2c0mux/i2c@1/imx477@1a\"\
-        ! capsfilter caps=video/x-raw,width=1920,height=1080,framerate=30/1,format=NV12\
-        ! queue2 max-size-bytes=0\
-        ! v4l2convert ! capsfilter caps=\"video/x-raw, format=BGR\"\
-        ! appsink sync=false";
+        ! video/x-bayer,width=2028,height=1080,framerate=40/1\
+        ! queue\
+        ! bayer2rgb\
+        ! v4l2convert capture-io-mode=2\ 
+        ! video/x-raw,width=" + std::to_string(cap_width) + ",height=" + std::to_string(cap_height) +
+        "! queue \
+        ! appsink";
 }
 
 std::string gst_out_pipeline()
 {
+    // ! rtph264pay config-interval=3 pt=96\
+    // ! udpsink host=192.168.191.18 port=5000";
+
+    //  ! rtspclientsink location=rtsp://localhost:8554/videostab debug=true";
     return "appsrc \
         ! video/x-raw, format=BGR\
-        ! queue2 max-size-bytes=0\
-        ! v4l2h264enc extra-controls=\"controls,repeat_sequence_header=1\"\
-        ! h264parse ! rtph264pay config-interval=1 pt=96\
-        ! udpsink host=192.168.191.18 port=5000 sync=false";
+        ! queue\
+        ! multipartmux ! multipartdemux single-stream=1\
+        ! video/x-raw, format=RGB\
+        ! videoconvert\
+        ! video/x-raw,format=RGBA\
+        ! v4l2convert capture-io-mode=2 \
+        ! v4l2h264enc ! video/x-h264,level=(string)4,profile=main \
+        ! h264parse\
+        ! qtmux \
+        ! udpsink host=127.0.0.1 port=5000";
 }
 
 int main(int argc, char **argv)
@@ -107,8 +130,10 @@ int main(int argc, char **argv)
     VideoCapture cap;
     VideoWriter out;
     Ptr<Tracker> tracker;
+    int capture_width = 1920;
+    int capture_height = 1080;
 
-    std::string pipeline = gst_cap_pipeline();
+    std::string pipeline = gst_cap_pipeline(capture_width, capture_height);
     std::cout << "Using pipeline: \n\t" << pipeline << "\n";
 
     cap.open(pipeline, cv::CAP_GSTREAMER);
@@ -119,23 +144,24 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    out.open(gst_out_pipeline(), 
-        cv::CAP_GSTREAMER, // apiPreference
-        0, // fourcc
-	    30, // fps
-	    cv::Size{1920, 1080}, 
-        true);
+    int codec = VideoWriter::fourcc('M', 'J', 'P', 'G');
+    out.open(gst_out_pipeline(),
+             cv::CAP_GSTREAMER, // apiPreference
+             codec,             // fourcc
+             30,                // fps
+             cv::Size{1920, 1080},
+             true);
     if (!out.isOpened())
     {
         cerr << "ERROR! Unable to open video writer\n";
         return -1;
     }
-    
+
     Mat cur, cur_grey;
     Mat prev, prev_grey;
 
     cap >> prev; // get the first frame.ch
-    cvtColor(prev, prev_grey, COLOR_BGR2GRAY);
+    cvtColor(prev, prev_grey, COLOR_RGB2GRAY);
 
     // Step 1 - Get previous to current frame transformation (dx, dy, da) for all frames
     vector<TransformParam> prev_to_cur_transform; // previous to current
@@ -168,7 +194,6 @@ int main(int argc, char **argv)
     int vert_border = HORIZONTAL_BORDER_CROP * prev.rows / prev.cols; // get the aspect ratio correct
     //
     int k = 1;
-    int max_frames = cap.get(CAP_PROP_FRAME_COUNT);
     Mat last_T;
     Mat prev_grey_, cur_grey_;
     for (;;)
@@ -182,7 +207,7 @@ int main(int argc, char **argv)
 
         // ============ Stabilize =================
         cur = frame;
-        cvtColor(cur, cur_grey, COLOR_BGR2GRAY);
+        cvtColor(cur, cur_grey, COLOR_RGB2GRAY);
 
         // vector from prev to cur
         vector<Point2f> prev_corner, cur_corner;
@@ -218,12 +243,12 @@ int main(int argc, char **argv)
         double dx = T.at<double>(0, 2);
         double dy = T.at<double>(1, 2);
         double da = atan2(T.at<double>(1, 0), T.at<double>(0, 0));
-        
+
         // Accumulated frame to frame transform
         x += dx;
         y += dy;
         a += da;
-        
+
         z = Trajectory(x, y, a);
         //
         if (k == 1)
@@ -242,7 +267,7 @@ int main(int argc, char **argv)
             X = X_ + K * (z - X_);              // z-X_ is residual,X(k) = X_(k)+K(k)*(z(k)-X_(k));
             P = (Trajectory(1, 1, 1) - K) * P_; // P(k) = (1-K(k))*P_(k);
         }
-    
+
         // target - current
         double diff_x = X.x - x;
         double diff_y = X.y - y;
@@ -260,10 +285,20 @@ int main(int argc, char **argv)
         T.at<double>(0, 2) = dx;
         T.at<double>(1, 2) = dy;
 
-        Mat cur2;
-        warpAffine(prev, cur2, T, cur.size());
-        cur2 = cur2(Range(vert_border, cur2.rows - vert_border), Range(HORIZONTAL_BORDER_CROP, cur2.cols - HORIZONTAL_BORDER_CROP));
-        // // ==================== Display =================
+        if (diff_x > capture_width * WARP_THRESHOLD || diff_y > capture_height * WARP_THRESHOLD)
+        {
+            out << cur;
+        }
+        else
+        {
+            Mat frame_stabilized;
+            warpAffine(prev, frame_stabilized, T, cur.size());
+            fixBorder(frame_stabilized);
+            cvtColor(frame_stabilized, frame_stabilized, COLOR_RGB2BGR);
+            out << frame_stabilized;
+        }
+
+        // // // ==================== Display =================
 
         // // Resize cur2 back to cur size, for better side by side comparison
         // resize(cur2, cur2, cur.size());
@@ -275,14 +310,12 @@ int main(int argc, char **argv)
         // cur2.copyTo(canvas(Range::all(), Range(cur2.cols + 10, cur2.cols * 2 + 10)));
 
         // // If too big to fit on the screen, then scale it down by 2, hopefully it'll fit :)
-        // if (canvas.cols > 1920)
+        // if (canvas.cols >= 1920)
         // {
-        //     resize(canvas, canvas, Size(canvas.cols / 2, canvas.rows` / 2));
+        //     resize(canvas, canvas, Size(canvas.cols / 2, canvas.rows / 2));
         // }
         // // outputVideo<<canvas;
         // imshow("before and after", canvas);
-
-        out << cur2;
 
         cur.copyTo(prev);
         cur_grey.copyTo(prev_grey);
