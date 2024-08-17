@@ -94,7 +94,8 @@ void fixBorder(Mat &frame_stabilized)
 std::string gst_cap_pipeline(int cap_width, int cap_height)
 {
     return "libcamerasrc ! \
-            video/x-raw,width=" + std::to_string(cap_width) + ",height=" + std::to_string(cap_height) + ",framerate=30/1,format=BGR \
+            video/x-raw,width=" +
+           std::to_string(cap_width) + ",height=" + std::to_string(cap_height) + ",framerate=30/1,format=BGR \
             ! appsink";
 }
 
@@ -122,6 +123,9 @@ int main(int argc, char **argv)
     Ptr<Tracker> tracker;
     int capture_width = 1920;
     int capture_height = 1080;
+    int roi_width = 400;
+    int roi_height = 400;
+    Rect roi = cv::Rect((capture_width - roi_width) / 2, (capture_height - roi_height) / 2, roi_width, roi_height);
 
     std::string pipeline = gst_cap_pipeline(capture_width, capture_height);
     std::cout << "Using pipeline: \n\t" << pipeline << "\n";
@@ -151,9 +155,9 @@ int main(int argc, char **argv)
     Mat prev, prev_grey;
 
     cap >> frame; // get the first frame.ch
-    
-    prev = frame(cv::Rect(0, 0, frame.cols/2, frame.rows/2));
-    resize(prev, prev, Size(frame.cols/2, frame.rows/2), 0, 0, INTER_AREA);
+
+    prev = frame(roi);
+    resize(prev, prev, Size(roi_width, roi_height), 0, 0, INTER_AREA);
     cvtColor(prev, prev_grey, COLOR_BGR2GRAY);
 
     // Step 1 - Get previous to current frame transformation (dx, dy, da) for all frames
@@ -199,8 +203,8 @@ int main(int argc, char **argv)
         }
 
         // ============ Stabilize =================
-        cur = frame(cv::Rect(0, 0, frame.cols/2, frame.rows/2));
-        resize(cur, cur, Size(frame.cols/2, frame.rows/2), 0, 0, INTER_AREA);
+        cur = frame(roi);
+        resize(cur, cur, Size(roi_width, roi_height), 0, 0, INTER_AREA);
         cvtColor(cur, cur_grey, COLOR_BGR2GRAY);
         // vector from prev to cur
         vector<Point2f> prev_corner, cur_corner;
