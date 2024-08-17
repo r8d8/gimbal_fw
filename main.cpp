@@ -93,14 +93,9 @@ void fixBorder(Mat &frame_stabilized)
 
 std::string gst_cap_pipeline(int cap_width, int cap_height)
 {
-    return "libcamerasrc camera-name=\"/base/soc/i2c0mux/i2c@1/imx477@1a\"\
-        ! video/x-bayer,width=2028,height=1080,framerate=40/1\
-        ! queue\
-        ! bayer2rgb\
-        ! v4l2convert capture-io-mode=2\ 
-        ! video/x-raw,width=" + std::to_string(cap_width) + ",height=" + std::to_string(cap_height) +
-        "! queue \
-        ! appsink";
+    return "libcamerasrc ! \
+            video/x-raw,width=" + std::to_string(cap_width) + ",height=" + std::to_string(cap_height) + ",framerate=30/1,format=BGR \
+            ! appsink";
 }
 
 std::string gst_out_pipeline()
@@ -111,16 +106,11 @@ std::string gst_out_pipeline()
     //  ! rtspclientsink location=rtsp://localhost:8554/videostab debug=true";
     return "appsrc \
         ! video/x-raw, format=BGR\
-        ! queue\
-        ! multipartmux ! multipartdemux single-stream=1\
-        ! video/x-raw, format=RGB\
-        ! videoconvert\
-        ! video/x-raw,format=RGBA\
-        ! v4l2convert capture-io-mode=2 \
+        ! v4l2convert \
         ! v4l2h264enc ! video/x-h264,level=(string)4,profile=main \
-        ! h264parse\
-        ! qtmux \
-        ! udpsink host=127.0.0.1 port=5000";
+        ! h264parse \
+        ! rtph264pay \
+        ! udpsink host=192.168.191.18 port=5600 sync=false auto-multicast=0";
 }
 
 int main(int argc, char **argv)
@@ -144,12 +134,12 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    int codec = VideoWriter::fourcc('M', 'J', 'P', 'G');
+    int codec = VideoWriter::fourcc('H', '2', '6', '4');
     out.open(gst_out_pipeline(),
              cv::CAP_GSTREAMER, // apiPreference
              codec,             // fourcc
              30,                // fps
-             cv::Size{1920, 1080},
+             cv::Size{capture_width, capture_height},
              true);
     if (!out.isOpened())
     {
@@ -160,8 +150,11 @@ int main(int argc, char **argv)
     Mat cur, cur_grey;
     Mat prev, prev_grey;
 
-    cap >> prev; // get the first frame.ch
-    cvtColor(prev, prev_grey, COLOR_RGB2GRAY);
+    cap >> frame; // get the first frame.ch
+    
+    prev = frame(cv::Rect(0, 0, frame.cols/2, frame.rows/2));
+    resize(prev, prev, Size(frame.cols/2, frame.rows/2), 0, 0, INTER_AREA);
+    cvtColor(prev, prev_grey, COLOR_BGR2GRAY);
 
     // Step 1 - Get previous to current frame transformation (dx, dy, da) for all frames
     vector<TransformParam> prev_to_cur_transform; // previous to current
@@ -206,9 +199,9 @@ int main(int argc, char **argv)
         }
 
         // ============ Stabilize =================
-        cur = frame;
-        cvtColor(cur, cur_grey, COLOR_RGB2GRAY);
-
+        cur = frame(cv::Rect(0, 0, frame.cols/2, frame.rows/2));
+        resize(cur, cur, Size(frame.cols/2, frame.rows/2), 0, 0, INTER_AREA);
+        cvtColor(cur, cur_grey, COLOR_BGR2GRAY);
         // vector from prev to cur
         vector<Point2f> prev_corner, cur_corner;
         vector<Point2f> prev_corner2, cur_corner2;
@@ -287,14 +280,13 @@ int main(int argc, char **argv)
 
         if (diff_x > capture_width * WARP_THRESHOLD || diff_y > capture_height * WARP_THRESHOLD)
         {
-            out << cur;
+            out << frame;
         }
         else
         {
             Mat frame_stabilized;
-            warpAffine(prev, frame_stabilized, T, cur.size());
+            warpAffine(frame, frame_stabilized, T, frame.size());
             fixBorder(frame_stabilized);
-            cvtColor(frame_stabilized, frame_stabilized, COLOR_RGB2BGR);
             out << frame_stabilized;
         }
 
