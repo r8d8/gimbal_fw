@@ -23,7 +23,8 @@ const int HORIZONTAL_BORDER_CROP = 20;
 
 // Fraction of captured frame width and height
 // Skip frame transformation if exceeds, to avoid big movement artifacts
-const float WARP_THRESHOLD = 0.25;
+const float WARP_LINEAR_THRESHOLD = 0.25;
+const float WARP_ROTATION_THRESHOLD = 0.52; // radians
 
 struct TransformParam
 {
@@ -111,6 +112,22 @@ std::string gst_out_pipeline()
         ! rtph264pay \
         ! udpsink host=192.168.191.18 port=5600 sync=false auto-multicast=0";
 }
+
+bool isValidLinear(float m, int cap_size)
+{
+    if (m < 0)
+        m = -m;
+    return m * WARP_LINEAR_THRESHOLD < cap_size;
+}
+
+bool isValidRotation(float a)
+{
+    if (a < 0)
+        a = -a;
+
+    return a < WARP_ROTATION_THRESHOLD;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -262,10 +279,10 @@ int main(int argc, char **argv)
             vector<uchar> status;
             vector<float> err;
 
-            goodFeaturesToTrack(prev_grey, prev_corner, 100, 0.02, 25);
-            Size winSize = Size(21, 21);
-            int maxLevel = 2;
-            TermCriteria criteria = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 25, 0.02);
+            goodFeaturesToTrack(prev_grey, prev_corner, 100, 0.05, 20);
+            Size winSize = Size(16, 16);
+            int maxLevel = 3;
+            TermCriteria criteria = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 20, 0.05);
             calcOpticalFlowPyrLK(prev_grey, cur_grey, prev_corner, cur_corner, status, err, winSize, maxLevel, criteria);
 
             // weed out bad matches
@@ -334,16 +351,16 @@ int main(int argc, char **argv)
             T.at<double>(0, 2) = dx;
             T.at<double>(1, 2) = dy;
 
-            if (diff_x > capture_width * WARP_THRESHOLD || diff_y > capture_height * WARP_THRESHOLD)
-            {
-                out << frame;
-            }
-            else
+            if (isValidLinear(diff_x, capture_width) && isValidLinear(diff_y, capture_height) && isValidRotation(diff_a))
             {
                 Mat frame_stabilized;
                 warpAffine(frame, frame_stabilized, T, frame.size());
                 fixBorder(frame_stabilized);
                 out << frame_stabilized;
+            }
+            else
+            {
+                out << frame;
             }
 
             cur.copyTo(prev);
