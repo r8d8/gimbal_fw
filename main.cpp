@@ -117,14 +117,13 @@ bool isValidLinear(float m, int cap_size)
 {
     if (m < 0)
         m = -m;
-    return m * WARP_LINEAR_THRESHOLD < cap_size;
+    return m < cap_size * WARP_LINEAR_THRESHOLD;
 }
 
 bool isValidRotation(float a)
 {
     if (a < 0)
         a = -a;
-
     return a < WARP_ROTATION_THRESHOLD;
 }
 
@@ -136,8 +135,8 @@ int main(int argc, char **argv)
     VideoCapture cap;
     VideoWriter out;
     Ptr<Tracker> tracker;
-    int capture_width = 1920;
-    int capture_height = 1080;
+    int capture_width = 1280;
+    int capture_height = 720;
     int capture_fps = 30;
     int roi_width = 512;
     int roi_height = 512;
@@ -279,10 +278,10 @@ int main(int argc, char **argv)
             vector<uchar> status;
             vector<float> err;
 
-            goodFeaturesToTrack(prev_grey, prev_corner, 100, 0.05, 20);
-            Size winSize = Size(16, 16);
+            goodFeaturesToTrack(prev_grey, prev_corner, 50, 0.05, 30);
+            Size winSize = Size(25, 25);
             int maxLevel = 3;
-            TermCriteria criteria = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 20, 0.05);
+            TermCriteria criteria = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 15, 0.05);
             calcOpticalFlowPyrLK(prev_grey, cur_grey, prev_corner, cur_corner, status, err, winSize, maxLevel, criteria);
 
             // weed out bad matches
