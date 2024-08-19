@@ -3,6 +3,7 @@
 #include <opencv2/tracking.hpp>
 #include <opencv2/videoio.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/video.hpp>
 #include <iostream>
 #include <cstring>
 #include <cassert>
@@ -12,20 +13,17 @@
 using namespace std;
 using namespace cv;
 
-// This video stablisation smooths the global trajectory using a sliding average window
+// #define USE_DIS_OPTICALFLOW
 
-// const int SMOOTHING_RADIUS = 15; // In frames. The larger the more stable the video, but less reactive to sudden panning
-const int HORIZONTAL_BORDER_CROP = 20; // In pixels. Crops the border to reduce the black borders from stabilisation being too noticeable.
+// Calculate new transformation once in interval. Use old  transformation in between calculation.
+const int OPTFLOW_FRAME_CAP_INTERVAL = 0;
+
+// In pixels. Crops the border to reduce the black borders from stabilisation being too noticeable.
+const int HORIZONTAL_BORDER_CROP = 20;
 
 // Fraction of captured frame width and height
 // Skip frame transformation if exceeds, to avoid big movement artifacts
 const float WARP_THRESHOLD = 0.25;
-
-// 1. Get previous to current frame transformation (dx, dy, da) for all frames
-// 2. Accumulate the transformations to get the image trajectory
-// 3. Smooth out the trajectory using an averaging window
-// 4. Generate new set of previous to current transform, such that the trajectory ends up being the same as the smoothed trajectory
-// 5. Apply the new transformation to the video
 
 struct TransformParam
 {
@@ -39,7 +37,7 @@ struct TransformParam
 
     double dx;
     double dy;
-    double da; // angle
+    double da;
 };
 
 struct Trajectory
@@ -82,7 +80,7 @@ struct Trajectory
 
     double x;
     double y;
-    double a; // angle
+    double a; // anglele
 };
 
 void fixBorder(Mat &frame_stabilized)
@@ -91,11 +89,11 @@ void fixBorder(Mat &frame_stabilized)
     warpAffine(frame_stabilized, frame_stabilized, T, frame_stabilized.size());
 }
 
-std::string gst_cap_pipeline(int cap_width, int cap_height)
+std::string gst_cap_pipeline(int cap_width, int cap_height, int cap_fps)
 {
-    return "libcamerasrc ! \
-            video/x-raw,width=" +
-           std::to_string(cap_width) + ",height=" + std::to_string(cap_height) + ",framerate=30/1,format=BGR \
+    return "libcamerasrc\
+            ! video/x-raw,width=" +
+           std::to_string(cap_width) + ",height=" + std::to_string(cap_height) + ",framerate=" + std::to_string(cap_fps) + "/1,format=BGR \
             ! appsink";
 }
 
@@ -123,11 +121,19 @@ int main(int argc, char **argv)
     Ptr<Tracker> tracker;
     int capture_width = 1920;
     int capture_height = 1080;
-    int roi_width = 400;
-    int roi_height = 400;
+    int capture_fps = 30;
+    int roi_width = 512;
+    int roi_height = 512;
     Rect roi = cv::Rect((capture_width - roi_width) / 2, (capture_height - roi_height) / 2, roi_width, roi_height);
 
-    std::string pipeline = gst_cap_pipeline(capture_width, capture_height);
+    Mat prevgray, gray, bgr;
+    Mat flow, flow_uv[2];
+    Mat magnitude, angle;
+    Mat hsv_split[3], hsv, hsv8;
+    Ptr<DenseOpticalFlow> dis_optflow = DISOpticalFlow::create(DISOpticalFlow::PRESET_FAST);
+
+    std::cout << cv::getBuildInformation();
+    std::string pipeline = gst_cap_pipeline(capture_width, capture_height, capture_fps);
     std::cout << "Using pipeline: \n\t" << pipeline << "\n";
 
     cap.open(pipeline, cv::CAP_GSTREAMER);
@@ -142,7 +148,7 @@ int main(int argc, char **argv)
     out.open(gst_out_pipeline(),
              cv::CAP_GSTREAMER, // apiPreference
              codec,             // fourcc
-             30,                // fps
+             capture_fps,       // fps
              cv::Size{capture_width, capture_height},
              true);
     if (!out.isOpened())
@@ -151,8 +157,16 @@ int main(int argc, char **argv)
         return -1;
     }
 
+#ifdef USE_DIS_OPTICALFLOW
+    Mat prevgray, gray, bgr;
+    Mat flow, flow_uv[2];
+    Mat magnitude, angle;
+    Mat hsv_split[3], hsv, hsv8;
+    Ptr<DenseOpticalFlow> dis_optflow = DISOpticalFlow::create(DISOpticalFlow::PRESET_FAST);
+#else
     Mat cur, cur_grey;
     Mat prev, prev_grey;
+    int frame_skip_count = 0;
 
     cap >> frame; // get the first frame.ch
 
@@ -177,22 +191,22 @@ int main(int argc, char **argv)
     Trajectory P_;                          // priori estimate error covariance
     Trajectory K;                           // gain
     Trajectory z;                           // actual measurement
-    double pstd = 4e-3;                     // can be changed
-    double cstd = 0.25;                     // can be changed
+    double pstd = 4e-3;                     // can be changleed
+    double cstd = 0.25;                     // can be changleed
     Trajectory Q(pstd, pstd, pstd);         // process noise covariance
     Trajectory R(cstd, cstd, cstd);         // measurement noise covariance
     // Step 4 - Generate new set of previous to current transform, such that the trajectory ends up being the same as the smoothed trajectory
     vector<TransformParam> new_prev_to_cur_transform;
-    //
-    // Step 5 - Apply the new transformation to the video
-    // cap.set(CV_CAP_PROP_POS_FRAMES, 0);
-    Mat T(2, 3, CV_64F);
 
-    int vert_border = HORIZONTAL_BORDER_CROP * prev.rows / prev.cols; // get the aspect ratio correct
+    Mat T(2, 3, CV_64F);
+    int vert_border = HORIZONTAL_BORDER_CROP * frame.rows / frame.cols; // get the aspect ratio correct
+
     //
     int k = 1;
     Mat last_T;
     Mat prev_grey_, cur_grey_;
+#endif
+
     for (;;)
     {
         cap.read(frame);
@@ -202,120 +216,141 @@ int main(int argc, char **argv)
             break;
         }
 
-        // ============ Stabilize =================
-        cur = frame(roi);
-        resize(cur, cur, Size(roi_width, roi_height), 0, 0, INTER_AREA);
-        cvtColor(cur, cur_grey, COLOR_BGR2GRAY);
-        // vector from prev to cur
-        vector<Point2f> prev_corner, cur_corner;
-        vector<Point2f> prev_corner2, cur_corner2;
-        vector<uchar> status;
-        vector<float> err;
-
-        goodFeaturesToTrack(prev_grey, prev_corner, 200, 0.01, 30);
-        calcOpticalFlowPyrLK(prev_grey, cur_grey, prev_corner, cur_corner, status, err);
-
-        // weed out bad matches
-        for (size_t i = 0; i < status.size(); i++)
+#ifdef USE_DIS_OPTICALFLOW
+        cvtColor(frame, gray, COLOR_BGR2GRAY);
+        if (!prevgray.empty())
         {
-            if (status[i])
-            {
-                prev_corner2.push_back(prev_corner[i]);
-                cur_corner2.push_back(cur_corner[i]);
-            }
+            // visualization
+            dis_optflow->calc(prevgray, gray, flow);
+            split(flow, flow_uv);
+            multiply(flow_uv[1], -1, flow_uv[1]);
+            cartToPolar(flow_uv[0], flow_uv[1], magnitude, angle, true);
+            normalize(magnitude, magnitude, 0, 1, NORM_MINMAX);
+            angle *= ((1.f / 360.f) * (180.f / 255.f));
+
+            // build  image
+            hsv_split[0] = angle;
+            hsv_split[1] = magnitude;
+            hsv_split[2] = Mat::ones(angle.size(), angle.type());
+            merge(hsv_split, 3, hsv);
+            hsv.convertTo(hsv8, CV_8U, 255.0);
+            cvtColor(hsv8, bgr, COLOR_HSV2BGR);
+
+            out << bgr;
         }
-
-        // translation + rotation only
-        Mat T = estimateRigidTransform(prev_corner2, cur_corner2, false); // false = rigid transform, no scaling/shearing
-
-        // in rare cases no transform is found. We'll just use the last known good transform.
-        if (T.data == NULL)
+        std::swap(prevgray, gray);
+#else
+        if (frame_skip_count > 0)
         {
-            last_T.copyTo(T);
-        }
+            frame_skip_count--;
 
-        T.copyTo(last_T);
-
-        // decompose T
-        double dx = T.at<double>(0, 2);
-        double dy = T.at<double>(1, 2);
-        double da = atan2(T.at<double>(1, 0), T.at<double>(0, 0));
-
-        // Accumulated frame to frame transform
-        x += dx;
-        y += dy;
-        a += da;
-
-        z = Trajectory(x, y, a);
-        //
-        if (k == 1)
-        {
-            // intial guesses
-            X = Trajectory(0, 0, 0); // Initial estimate,  set 0
-            P = Trajectory(1, 1, 1); // set error variance,set 1
-        }
-        else
-        {
-            // time update（prediction）
-            X_ = X;     // X_(k) = X(k-1);
-            P_ = P + Q; // P_(k) = P(k-1)+Q;
-            // measurement update（correction）
-            K = P_ / (P_ + R);                  // gain;K(k) = P_(k)/( P_(k)+R );
-            X = X_ + K * (z - X_);              // z-X_ is residual,X(k) = X_(k)+K(k)*(z(k)-X_(k));
-            P = (Trajectory(1, 1, 1) - K) * P_; // P(k) = (1-K(k))*P_(k);
-        }
-
-        // target - current
-        double diff_x = X.x - x;
-        double diff_y = X.y - y;
-        double diff_a = X.a - a;
-
-        dx = dx + diff_x;
-        dy = dy + diff_y;
-        da = da + diff_a;
-
-        T.at<double>(0, 0) = cos(da);
-        T.at<double>(0, 1) = -sin(da);
-        T.at<double>(1, 0) = sin(da);
-        T.at<double>(1, 1) = cos(da);
-
-        T.at<double>(0, 2) = dx;
-        T.at<double>(1, 2) = dy;
-
-        if (diff_x > capture_width * WARP_THRESHOLD || diff_y > capture_height * WARP_THRESHOLD)
-        {
-            out << frame;
-        }
-        else
-        {
             Mat frame_stabilized;
-            warpAffine(frame, frame_stabilized, T, frame.size());
+            warpAffine(frame, frame_stabilized, last_T, frame.size());
             fixBorder(frame_stabilized);
             out << frame_stabilized;
         }
+        else
+        {
+            frame_skip_count = OPTFLOW_FRAME_CAP_INTERVAL;
 
-        // // // ==================== Display =================
+            cur = frame(roi);
+            resize(cur, cur, Size(roi_width, roi_height), 0, 0, INTER_AREA);
+            cvtColor(cur, cur_grey, COLOR_BGR2GRAY);
+            // vector from prev to cur
+            vector<Point2f> prev_corner, cur_corner;
+            vector<Point2f> prev_corner2, cur_corner2;
+            vector<uchar> status;
+            vector<float> err;
 
-        // // Resize cur2 back to cur size, for better side by side comparison
-        // resize(cur2, cur2, cur.size());
+            goodFeaturesToTrack(prev_grey, prev_corner, 100, 0.02, 25);
+            Size winSize = Size(21, 21);
+            int maxLevel = 2;
+            TermCriteria criteria = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 25, 0.02);
+            calcOpticalFlowPyrLK(prev_grey, cur_grey, prev_corner, cur_corner, status, err, winSize, maxLevel, criteria);
 
-        // // Now draw the original and stablised side by side for coolness
-        // Mat canvas = Mat::zeros(cur.rows, cur.cols * 2 + 10, cur.type());
+            // weed out bad matches
+            for (size_t i = 0; i < status.size(); i++)
+            {
+                if (status[i])
+                {
+                    prev_corner2.push_back(prev_corner[i]);
+                    cur_corner2.push_back(cur_corner[i]);
+                }
+            }
 
-        // prev.copyTo(canvas(Range::all(), Range(0, cur2.cols)));
-        // cur2.copyTo(canvas(Range::all(), Range(cur2.cols + 10, cur2.cols * 2 + 10)));
+            // translation + rotation only
+            T = estimateRigidTransform(prev_corner2, cur_corner2, false); // false = rigid transform, no scaling/shearing
 
-        // // If too big to fit on the screen, then scale it down by 2, hopefully it'll fit :)
-        // if (canvas.cols >= 1920)
-        // {
-        //     resize(canvas, canvas, Size(canvas.cols / 2, canvas.rows / 2));
-        // }
-        // // outputVideo<<canvas;
-        // imshow("before and after", canvas);
+            // in rare cases no transform is found. We'll just use the last known good transform.
+            if (T.data == NULL)
+            {
+                last_T.copyTo(T);
+            }
+            T.copyTo(last_T);
 
-        cur.copyTo(prev);
-        cur_grey.copyTo(prev_grey);
-        k++;
+            // decompose T
+            double dx = T.at<double>(0, 2);
+            double dy = T.at<double>(1, 2);
+            double da = atan2(T.at<double>(1, 0), T.at<double>(0, 0));
+
+            // Accumulated frame to frame transform
+            x += dx;
+            y += dy;
+            a += da;
+
+            z = Trajectory(x, y, a);
+            //
+            if (k == 1)
+            {
+                // intial guesses
+                X = Trajectory(0, 0, 0); // Initial estimate,  set 0
+                P = Trajectory(1, 1, 1); // set error variance,set 1
+            }
+            else
+            {
+                // time update（prediction）
+                X_ = X;     // X_(k) = X(k-1);
+                P_ = P + Q; // P_(k) = P(k-1)+Q;
+                // measurement update（correction）
+                K = P_ / (P_ + R);                  // gain;K(k) = P_(k)/( P_(k)+R );
+                X = X_ + K * (z - X_);              // z-X_ is residual,X(k) = X_(k)+K(k)*(z(k)-X_(k));
+                P = (Trajectory(1, 1, 1) - K) * P_; // P(k) = (1-K(k))*P_(k);
+            }
+
+            // target - current
+            double diff_x = X.x - x;
+            double diff_y = X.y - y;
+            double diff_a = X.a - a;
+
+            dx = dx + diff_x;
+            dy = dy + diff_y;
+            da = da + diff_a;
+
+            T.at<double>(0, 0) = cos(da);
+            T.at<double>(0, 1) = -sin(da);
+            T.at<double>(1, 0) = sin(da);
+            T.at<double>(1, 1) = cos(da);
+
+            T.at<double>(0, 2) = dx;
+            T.at<double>(1, 2) = dy;
+
+            if (diff_x > capture_width * WARP_THRESHOLD || diff_y > capture_height * WARP_THRESHOLD)
+            {
+                out << frame;
+            }
+            else
+            {
+                Mat frame_stabilized;
+                warpAffine(frame, frame_stabilized, T, frame.size());
+                fixBorder(frame_stabilized);
+                out << frame_stabilized;
+            }
+
+            cur.copyTo(prev);
+            cur_grey.copyTo(prev_grey);
+            k++;
+        }
+#endif
 
         // quit on ESC button
         if (waitKey(1) == 27)
