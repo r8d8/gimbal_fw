@@ -1,4 +1,4 @@
-Jetson Nano pipeline with nvstabilize
+Jetson Nano pipeline with [nvstabilize](https://github.com/ahtabrizi/gstnvstabilize)
 
 ```
 
