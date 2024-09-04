@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 
-# define a registry to push the images to
-#export REGISTRY=<your dockerhub username>
-# create new buildx that support multiple platforms
-docker buildx create --use  --driver-opt network=host --name MultiPlatform
+export BASE_IMAGE_NAME= ""
+export REGISTRY=<your dockerhub username>
 
-# build the image for two different platforms and push the images
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -f ros2_base.Dockerfile \
+# build base image for Jetson Nano
+DOCKER_BUILDKIT=1 docker build \
+  --platform linux/arm64 \
+  --network host\
+  -f Dockerfile.aarch64 \
+  -t ${REGISTRY}/${BASE_IMAGE_NAME}\
+  --push .
+
+# build ROS2
+DOCKER_BUILDKIT=1 docker build \
+  --platform linux/arm64 \
+  --network host\
+  --build-arg BASE_IMAGE="${BASE_IMAGE_NAME}"\
+  -f Dockerfile.aarch64\
+  -t ${REGISTRY}/jnano_ros2:latest\
   --push .

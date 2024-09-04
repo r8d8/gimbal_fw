@@ -1,0 +1,12 @@
+/**:
+  ros__parameters:
+    plugin_allowlist:
+      - sys_status
+      - command
+      - imu
+      - rc_io
+      - param
+      - vision*
+      - local*
+      - global_position
+      - gimbal_control
