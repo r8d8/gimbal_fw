@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 
-export BASE_IMAGE_NAME= ""
-export REGISTRY=<your dockerhub username>
+export BASE_IMAGE_NAME="dustynv/ros:humble-ros-base-l4t-r35.4.1"
+export REGISTRY="ghcr.io/r8d8/jnano_comp"
 
-# build base image for Jetson Nano
-DOCKER_BUILDKIT=1 docker build \
-  --platform linux/arm64 \
-  --network host\
-  -f Dockerfile.aarch64 \
-  -t ${REGISTRY}/${BASE_IMAGE_NAME}\
-  --push .
+docker login ghcr.io -u r8d8 -p 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
+
+# # build base image for Jetson Nano
+# DOCKER_BUILDKIT=1 docker build \
+#   --platform linux/arm64 \
+#   --network host\
+#   -f Dockerfile.aarch64 \
+#   -t ${REGISTRY}/${BASE_IMAGE_NAME}\
+#   --push .
 
 # build ROS2
 DOCKER_BUILDKIT=1 docker build \
   --platform linux/arm64 \
   --network host\
   --build-arg BASE_IMAGE="${BASE_IMAGE_NAME}"\
-  -f Dockerfile.aarch64\
+  --progress=plain\
+  -f Dockerfile.l4t_ros2humble\
   -t ${REGISTRY}/jnano_ros2:latest\
   --push .
