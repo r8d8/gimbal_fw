@@ -1,4 +1,4 @@
-Jetson Nano pipeline with [nvstabilize](https://github.com/ahtabrizi/gstnvstabilize)
+Jetson Xavier pipeline with [nvstabilize](https://github.com/ahtabrizi/gstnvstabilize)
 
 ```
 GST_DEBUG=3 gst-launch-1.0 rtspsrc location=rtsp://admin:Pwd12345@192.168.1.68/Streaming/Channels/0 latency=10 ! queue \
