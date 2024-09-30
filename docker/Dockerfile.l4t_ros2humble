@@ -1,4 +1,4 @@
-FROM docker.io/arm64v8/ubuntu:22.04
+FROM docker.io/arm64v8/ubuntu:22.04 as ci
 
 # Env setup
 RUN apt-get clean && apt-get update && apt-get install -y locales curl
@@ -152,50 +152,50 @@ RUN --mount=type=cache,target=/var/cache/apt\
 RUN sudo rosdep init &&\
     rosdep update
 
-# Install Mavros 
-WORKDIR /tmp
-RUN wget https://raw.githubusercontent.com/mavlink/mavros/ros2/mavros/scripts/install_geographiclib_datasets.sh \
-    && chmod +x ./install_geographiclib_datasets.sh \
-    && sudo ./install_geographiclib_datasets.sh
 
-  
-RUN --mount=type=cache,target=/var/cache/apt\  
-    apt-get install -y ros-humble-mavros\
-    ros-humble-mavros-extras
+FROM ci as robot
 
-# add new sudo user
-ENV USERNAME juser
+# Add new sudo user
 ARG USERNAME=juser
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
-
-# Create the user
 RUN groupadd --gid $USER_GID $USERNAME \
     && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME\
-    && usermod -a -G dialout $USERNAME
+    && usermod -a -G dialout $USERNAME  
 
 USER $USERNAME
+ENV USER=$USERNAME    
 ENV USER_WORKSPACE=/home/$USERNAME/ros2_ws
-
 ENV PROJECT_NAME=jcomp
 ENV VIRTUAL_ENV=/home/$USERNAME/.venv/${PROJECT_NAME}
 RUN python3 -m venv --system-site-packages --symlinks $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+SHELL ["/bin/bash", "-c"]
 
-RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc\
-    && echo "source ${USER_WORKSPACE}/install/local_setup.bash" >> ~/.bashrc\
-    && echo "source /home/${USERNAME}/.venv/${PROJECT_NAME}/bin/activate" >>  ~/.bashrc\
-    && echo "\n# Ensure colcon is run in the venv\nalias colcon='python3 -m colcon'" >> ~/.bashrc\
-    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> ~/.bashrc
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /home/$USERNAME/.bashrc\
+    && echo "if [ -f ${USER_WORKSPACE}/install/setup.bash ];\
+        then source ${USER_WORKSPACE}/install/local_setup.bash; fi" >> /home/$USERNAME/.bashrc\
+    && echo "source /home/${USERNAME}/.venv/${PROJECT_NAME}/bin/activate" >> /home/$USERNAME/.bashrc\
+    && echo "\n# Ensure colcon is run in the venv\nalias colcon='python3 -m colcon'" >> /home/$USERNAME/.bashrc\
+    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /home/$USERNAME/.bashrc
 
 COPY --chown=$USER_UID:$USER_GID . ${USER_WORKSPACE}/src/$PROJECT_NAME
 
-# Launch mavros node
-RUN . "/opt/ros/${ROS_DISTRO}/setup.sh" \
-    && ros2 launch mavros apm.launch  fcu_url:=/dev/ttyTHS1:115200 gcs_url:=udp://192.168.191.18
+# Install Mavros 
+RUN --mount=type=cache,target=/var/cache/apt\  
+    sudo apt-get install -y ros-humble-mavros\
+    ros-humble-mavros-extras
+
+WORKDIR /tmp
+RUN wget https://raw.githubusercontent.com/mavlink/mavros/ros2/mavros/scripts/install_geographiclib_datasets.sh \
+    && chmod +x /tmp/install_geographiclib_datasets.sh \
+    && sudo /tmp/install_geographiclib_datasets.sh
+
+RUN sudo apt-get -y autoremove
 
 # Set up the entrypoint
-COPY ./ros2_entrypoint.sh /
-ENTRYPOINT [ "/ros2_entrypoint.sh" ]
+COPY ./ros2_entrypoint.sh ${USER_WORKSPACE}
+RUN sudo chmod +x ${USER_WORKSPACE}/ros2_entrypoint.sh
+ENTRYPOINT ${USER_WORKSPACE}/ros2_entrypoint.sh

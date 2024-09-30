@@ -2,7 +2,7 @@
 
 export REGISTRY="ghcr.io/r8d8/jnano_comp"
 
-docker login ghcr.io -u r8d8 -p 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
+docker login ghcr.io -u r8d8 -p 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
 
 # # build base image for Jetson Nano
 # DOCKER_BUILDKIT=1 docker build \
